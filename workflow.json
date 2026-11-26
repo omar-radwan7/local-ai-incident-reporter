@@ -1,0 +1,265 @@
+{
+  "name": "Local AI Incident Reporter",
+  "nodes": [
+    {
+      "parameters": {},
+      "id": "a1",
+      "name": "Run manually",
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [
+        0,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "minutes",
+              "minutesInterval": 5
+            }
+          ]
+        }
+      },
+      "id": "a2",
+      "name": "Every 5 minutes",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        0,
+        200
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// The services to watch. The last two are broken on purpose so the alert path runs.\nreturn [\n  { json: { name: 'Portfolio website', url: 'https://www.omar-radwan.com' } },\n  { json: { name: 'GitHub profile', url: 'https://github.com/omar-radwan7' } },\n  { json: { name: 'Test: always 503', url: 'https://httpbin.org/status/503' } },\n  { json: { name: 'Test: always slow (8 s)', url: 'https://httpbin.org/delay/8' } }\n];"
+      },
+      "id": "a3",
+      "name": "Services",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        240,
+        100
+      ]
+    },
+    {
+      "parameters": {
+        "url": "={{ $json.url }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "User-Agent",
+              "value": "Mozilla/5.0 (X11; Linux x86_64) incident-reporter"
+            }
+          ]
+        },
+        "options": {
+          "response": {
+            "response": {
+              "fullResponse": true,
+              "neverError": true,
+              "responseFormat": "text"
+            }
+          },
+          "timeout": 5000
+        }
+      },
+      "id": "a4",
+      "name": "Check service",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        480,
+        100
+      ],
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Combine each check result with the service it belongs to.\nconst services = $('Services').all();\nreturn $input.all().map((item, i) => {\n  const s = services[i].json;\n  const code = item.json.statusCode ?? null;\n  const err = item.json.error;\n  const error = err ? (err.message || String(err)) : null;\n  const ok = code !== null && code >= 200 && code < 400;\n  return { json: { name: s.name, url: s.url, statusCode: code, error, ok, checkedAt: new Date().toISOString() } };\n});"
+      },
+      "id": "a5",
+      "name": "Evaluate",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        720,
+        100
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose"
+          },
+          "conditions": [
+            {
+              "id": "c1",
+              "leftValue": "={{ $json.ok }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "a6",
+      "name": "Healthy?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        960,
+        100
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "return $input.all().map(i => ({ json: { service: i.json.name, status: 'UP', statusCode: i.json.statusCode } }));"
+      },
+      "id": "a7",
+      "name": "OK",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1200,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://127.0.0.1:11434/api/generate",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ model: 'qwen2.5:3b', stream: false, options: { temperature: 0.2 }, prompt: 'You help a data center operations team. A service check failed.\\nService: ' + $json.name + '\\nURL: ' + $json.url + '\\nHTTP status: ' + ($json.statusCode ?? 'none') + '\\nError: ' + ($json.error ?? 'none') + '\\nWrite a short incident note with exactly three lines:\\n1. What is wrong\\n2. Two likely causes\\n3. The first thing an engineer should check\\nUse only the data above. Do not invent server names or details.' }) }}",
+        "options": {
+          "timeout": 120000
+        }
+      },
+      "id": "a8",
+      "name": "Local LLM summary (Ollama)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1200,
+        200
+      ]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "const s = $('Healthy?').item.json;\nreturn { json: { service: s.name, status: 'DOWN', statusCode: s.statusCode, error: s.error, checkedAt: s.checkedAt, incidentNote: $json.response } };"
+      },
+      "id": "a9",
+      "name": "Incident report",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1440,
+        200
+      ]
+    }
+  ],
+  "connections": {
+    "Run manually": {
+      "main": [
+        [
+          {
+            "node": "Services",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Every 5 minutes": {
+      "main": [
+        [
+          {
+            "node": "Services",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Services": {
+      "main": [
+        [
+          {
+            "node": "Check service",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check service": {
+      "main": [
+        [
+          {
+            "node": "Evaluate",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Evaluate": {
+      "main": [
+        [
+          {
+            "node": "Healthy?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Healthy?": {
+      "main": [
+        [
+          {
+            "node": "OK",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Local LLM summary (Ollama)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Local LLM summary (Ollama)": {
+      "main": [
+        [
+          {
+            "node": "Incident report",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "id": "UYlXKxWhrEUPCpaS"
+}
